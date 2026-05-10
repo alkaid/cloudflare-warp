@@ -17,7 +17,7 @@ services:
     container_name: warp
     restart: always
     ports:
-      - "1080:1080"  # SOCKS5 proxy
+      - "40000:40000"  # WARP instance SOCKS5 proxy
       # - "8080:8080"  # HTTP proxy
     volumes:
       - warp-data:/var/lib/cloudflare-warp
@@ -29,10 +29,10 @@ volumes:
 ```bash
 docker compose up -d
 
-# Test SOCKS5 proxy
-curl --socks5-hostname 127.0.0.1:1080 https://cloudflare.com/cdn-cgi/trace
+# Test direct WARP instance proxy
+curl --socks5-hostname 127.0.0.1:40000 https://cloudflare.com/cdn-cgi/trace
 
-# Test HTTP proxy (if port 8080 exposed)
+# Test GOST HTTP proxy (if START_GOST=true and port 8080 is exposed)
 curl -x http://127.0.0.1:8080 https://cloudflare.com/cdn-cgi/trace
 ```
 
@@ -43,6 +43,9 @@ If working, you'll see `warp=on` in the output.
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `WARP_INSTANCES` | Number of WARP instances. Each gets a unique Cloudflare IP. Traffic is round-robined across all instances. No extra capabilities required | `1` |
+| `START_GOST` | Start GOST aggregate proxies on 1080/1081/8080/8081/8388/8389. When disabled, direct WARP instance ports 40000+ remain available | `false` |
+| `WARP_INSTANCE_PORT_BASE` | First externally exposed direct WARP instance port. Instance N is exposed on this port plus N | `40000` |
+| `WARP_INTERNAL_PORT_BASE` | First localhost-only port used by warp-svc before forwarding to the exposed instance port | `41000` |
 | `WARP_LICENSE_KEY` | WARP+ license key. Comma-separated for multiple keys — tries each in order, skips any that fail | - |
 | `WARP_ORG` | Zero Trust team name. Enables automatic enrollment via service token (see [Zero Trust](#zero-trust-free-warp-routing) section). Mutually exclusive with `WARP_LICENSE_KEY` | - |
 | `WARP_AUTH_CLIENT_ID` | Service token Client ID (required when `WARP_ORG` is set) | - |
@@ -65,6 +68,7 @@ services:
       - "1080:1080"  # SOCKS5 proxy
       - "8080:8080"  # HTTP proxy
     environment:
+      - START_GOST=true
       - PROXY_USER=myuser
       - PROXY_PASS=mypassword
     volumes:
@@ -84,10 +88,11 @@ curl -x http://myuser:mypassword@127.0.0.1:8080 https://cloudflare.com/cdn-cgi/t
 
 ## Direct Proxy (Bypass WARP)
 
-Direct proxies are always available that exit through Docker's network without routing through WARP. Useful when you need your real IP for certain services.
+GOST direct proxies exit through Docker's network without routing through WARP. Useful when you need your real IP for certain services. Direct and aggregate GOST proxies require `START_GOST=true`.
 
 | Port | Protocol | Route |
 |------|----------|-------|
+| 40000+ | SOCKS5 | Direct access to each WARP instance |
 | 1080 | SOCKS5 | Through WARP (Cloudflare IP) |
 | 1081 | SOCKS5 | Direct (real IP) |
 | 8080 | HTTP | Through WARP (Cloudflare IP) |
@@ -103,6 +108,7 @@ services:
       - "8080:8080"  # HTTP WARP proxy
       - "8081:8081"  # HTTP Direct proxy
     environment:
+      - START_GOST=true
       - PROXY_USER=myuser
       - PROXY_PASS=mypassword
     volumes:
@@ -135,7 +141,7 @@ environment:
   - WARP_INSTANCES=10    # each request exits through a different IP
 ```
 
-Each instance uses ~50-100 MB RAM and starts 2 seconds apart. If an instance fails, GOST skips it after 3 failures and retries after 30s.
+Each instance is exposed directly on `40000+N` (for example, instance 0 is `40000`, instance 1 is `40001`). If `START_GOST=true`, GOST also provides round-robin aggregate proxies on 1080/8080/8388. Each instance uses ~50-100 MB RAM and starts 2 seconds apart. If an instance fails, GOST skips it after 3 failures and retries after 30s.
 
 ## Zero Trust (Free WARP+ Routing)
 
@@ -143,7 +149,7 @@ Enroll devices into Cloudflare Zero Trust using service tokens for free WARP+ eq
 
 ## Mobile VPN (Shadowsocks)
 
-Connect your mobile devices using Shadowsocks apps - works as a system-wide VPN without requiring special Docker privileges. **Shadowsocks is always enabled** on ports 8388/8389.
+Connect your mobile devices using Shadowsocks apps - works as a system-wide VPN without requiring special Docker privileges. Shadowsocks is available on ports 8388/8389 when `START_GOST=true`.
 
 ### Supported Apps
 
@@ -164,6 +170,7 @@ services:
       - "8388:8388"  # Shadowsocks WARP (Cloudflare IP)
       - "8389:8389"  # Shadowsocks Direct (real IP)
     environment:
+      - START_GOST=true
       - PROXY_PASS=your-secure-password  # Optional: sets password for all protocols
     volumes:
       - warp-data:/var/lib/cloudflare-warp

@@ -4,6 +4,7 @@ FROM ${BASE_IMAGE}
 
 ARG COMMIT_SHA
 ARG TARGETPLATFORM
+ARG GOST_VERSION=3.2.6
 
 LABEL org.opencontainers.image.title="Cloudflare WARP"
 LABEL org.opencontainers.image.description="Docker container for Cloudflare WARP client with GOST proxy support"
@@ -27,14 +28,13 @@ RUN case ${TARGETPLATFORM} in \
     esac && \
     apt-get update && \
     apt-get upgrade -y && \
-    apt-get install -y --no-install-recommends ca-certificates curl gnupg lsb-release sudo jq dbus && \
+    apt-get install -y --no-install-recommends ca-certificates curl gnupg lsb-release sudo dbus socat && \
     curl https://pkg.cloudflareclient.com/pubkey.gpg | gpg --yes --dearmor --output /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg && \
     echo "deb [signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ $(lsb_release -cs) main" | tee /etc/apt/sources.list.d/cloudflare-client.list && \
     apt-get update && \
     apt-get install -y --no-install-recommends cloudflare-warp && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/* && \
-    GOST_VERSION=$(curl -s https://api.github.com/repos/go-gost/gost/releases/latest | jq -r '.tag_name' | sed 's/^v//') && \
     echo "Installing GOST version: ${GOST_VERSION}" && \
     FILE_NAME="gost_${GOST_VERSION}_linux_${ARCH}.tar.gz" && \
     curl -fLO "https://github.com/go-gost/gost/releases/download/v${GOST_VERSION}/${FILE_NAME}" && \
@@ -53,6 +53,7 @@ RUN mkdir -p /home/warp/.local/share/warp && \
     echo -n 'yes' > /home/warp/.local/share/warp/accepted-tos.txt
 
 ENV WARP_INSTANCES=1
+ENV START_GOST=false
 ENV WARP_CONNECT_TIMEOUT=30
 ENV PROXY_USER=
 ENV PROXY_PASS=

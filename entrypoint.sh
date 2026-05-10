@@ -10,10 +10,40 @@
 set -e
 
 WARP_INSTANCES=${WARP_INSTANCES:-1}
+START_GOST=${START_GOST:-false}
+WARP_INSTANCE_PORT_BASE=${WARP_INSTANCE_PORT_BASE:-40000}
+WARP_INTERNAL_PORT_BASE=${WARP_INTERNAL_PORT_BASE:-41000}
+SOCAT_PIDS=()
+
+is_true() {
+    case "${1:-}" in
+        1|true|TRUE|yes|YES|on|ON) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+start_instance_port_forward() {
+    local external_port="$1"
+    local internal_port="$2"
+
+    echo "Exposing WARP instance port on 0.0.0.0:${external_port} -> 127.0.0.1:${internal_port}"
+    socat "TCP-LISTEN:${external_port},fork,reuseaddr,bind=0.0.0.0" "TCP:127.0.0.1:${internal_port}" &
+    SOCAT_PIDS+=($!)
+}
 
 # Validate WARP_INSTANCES
 if ! [[ "$WARP_INSTANCES" =~ ^[0-9]+$ ]] || [ "$WARP_INSTANCES" -lt 1 ]; then
     echo "Error: WARP_INSTANCES must be a positive integer"
+    exit 1
+fi
+
+if ! [[ "$WARP_INSTANCE_PORT_BASE" =~ ^[0-9]+$ ]] || [ "$WARP_INSTANCE_PORT_BASE" -lt 1024 ]; then
+    echo "Error: WARP_INSTANCE_PORT_BASE must be an integer >= 1024"
+    exit 1
+fi
+
+if ! [[ "$WARP_INTERNAL_PORT_BASE" =~ ^[0-9]+$ ]] || [ "$WARP_INTERNAL_PORT_BASE" -lt 1024 ]; then
+    echo "Error: WARP_INTERNAL_PORT_BASE must be an integer >= 1024"
     exit 1
 fi
 
@@ -82,9 +112,11 @@ MDMEOF
 }
 
 # ==============================================================================
-# SINGLE INSTANCE MODE (default, fully backward-compatible)
+# SINGLE INSTANCE MODE
 # ==============================================================================
 if [ "$WARP_INSTANCES" -eq 1 ]; then
+    EXTERNAL_PORT=${WARP_INSTANCE_PORT_BASE}
+    INTERNAL_PORT=${WARP_INTERNAL_PORT_BASE}
 
     # start dbus
     sudo mkdir -p /run/dbus
@@ -95,11 +127,12 @@ if [ "$WARP_INSTANCES" -eq 1 ]; then
 
     # Write MDM config for Zero Trust (must happen before warp-svc reads data dir)
     if [ "$ZT_MODE" = true ]; then
-        write_mdm_xml "/var/lib/cloudflare-warp" 40000
+        write_mdm_xml "/var/lib/cloudflare-warp" "$INTERNAL_PORT"
     fi
 
     # start the daemon
     sudo warp-svc --accept-tos &
+    WARP_PID=$!
 
     # wait for the daemon to be ready
     MAX_WAIT=${WARP_CONNECT_TIMEOUT:-30}
@@ -122,10 +155,10 @@ if [ "$WARP_INSTANCES" -eq 1 ]; then
 
     if [ "$ZT_MODE" = true ]; then
         # Zero Trust: warp-svc handles enrollment automatically via MDM config.
-        # MDM sets service_mode=proxy and proxy_port=40000; connect as safety net.
+        # MDM sets service_mode=proxy and proxy_port; connect as safety net.
         echo "Zero Trust mode: waiting for automatic enrollment via service token..."
         warp-cli --accept-tos connect 2>/dev/null || true
-        echo "WARP Zero Trust proxy active on localhost:40000 (org: ${WARP_ORG})"
+        echo "WARP Zero Trust proxy active on localhost:${INTERNAL_PORT} (org: ${WARP_ORG})"
     else
         # register and apply license (tries all keys in order, stops on first success)
         STORED_KEY_FILE="/var/lib/cloudflare-warp/.license_key"
@@ -182,12 +215,22 @@ if [ "$WARP_INSTANCES" -eq 1 ]; then
 
         # set proxy mode and connect
         warp-cli --accept-tos mode proxy
+        warp-cli --accept-tos proxy port "$INTERNAL_PORT"
         warp-cli --accept-tos connect
-        echo "WARP proxy mode active on localhost:40000"
+        echo "WARP proxy mode active on localhost:${INTERNAL_PORT}"
     fi
 
     # disable qlog
     warp-cli --accept-tos debug qlog disable
+
+    start_instance_port_forward "$EXTERNAL_PORT" "$INTERNAL_PORT"
+    printf "%s\n" "$EXTERNAL_PORT" > /tmp/healthy-warp-ports
+
+    if ! is_true "$START_GOST"; then
+        echo "START_GOST is disabled; WARP instance is available on :${EXTERNAL_PORT}"
+        wait "$WARP_PID"
+        exit 0
+    fi
 
     # Build GOST arguments
     GOST_LISTEN=":1080"
@@ -235,7 +278,7 @@ if [ "$WARP_INSTANCES" -eq 1 ]; then
     echo "  - Direct exit on :8389 (method: ${SS_METHOD})"
 
     # Shadowsocks through WARP
-    gost -L "ss://${SS_METHOD}:${SS_PASS}@:8388?${GOST_OPTS}" -F socks5://127.0.0.1:40000 &
+    gost -L "ss://${SS_METHOD}:${SS_PASS}@:8388?${GOST_OPTS}" -F socks5://127.0.0.1:${EXTERNAL_PORT} &
 
     # Shadowsocks direct (bypass WARP)
     gost -L "ss://${SS_METHOD}:${SS_PASS}@:8389?${GOST_OPTS}" &
@@ -258,7 +301,7 @@ if [ "$WARP_INSTANCES" -eq 1 ]; then
 
     # Start WARP proxies (SOCKS5 on 1080, HTTP on 8080) - chain to WARP
     echo "Starting WARP proxies on :1080 (SOCKS5) and :8080 (HTTP) -> WARP proxy"
-    gost -L "socks5://${GOST_LISTEN}?${GOST_OPTS}" -L "http://${HTTP_WARP_LISTEN}?${GOST_OPTS}" -F socks5://127.0.0.1:40000
+    gost -L "socks5://${GOST_LISTEN}?${GOST_OPTS}" -L "http://${HTTP_WARP_LISTEN}?${GOST_OPTS}" -F socks5://127.0.0.1:${EXTERNAL_PORT}
 
     # Unreachable — gost above runs in the foreground
     exit 0
@@ -301,7 +344,7 @@ generate_gost_config() {
     local healthy_ports=""
     for i in $(seq 0 $((WARP_INSTANCES - 1))); do
         if [ -f "${verify_dir}/${i}" ]; then
-            local port=$((40000 + i))
+            local port=$((WARP_INSTANCE_PORT_BASE + i))
             nodes="${nodes}
     - name: warp-${i}
       addr: 127.0.0.1:${port}
@@ -443,7 +486,7 @@ EOF
 # ---- start each WARP instance with isolated paths ----
 INSTANCE_PIDS=()
 for i in $(seq 0 $((WARP_INSTANCES - 1))); do
-    PORT=$((40000 + i))
+    PORT=$((WARP_INTERNAL_PORT_BASE + i))
     /start-warp-instance.sh \
         "$i" "$PORT" "$LICENSE_KEYS_CSV" "${WARP_CONNECT_TIMEOUT:-30}" &
     INSTANCE_PIDS+=($!)
@@ -460,7 +503,7 @@ VERIFY_PIDS=()
 
 for i in $(seq 0 $((WARP_INSTANCES - 1))); do
     (
-        PORT=$((40000 + i))
+        PORT=$((WARP_INTERNAL_PORT_BASE + i))
         WAIT=0
         while [ "$WAIT" -lt "$MAX_VERIFY_WAIT" ]; do
             if curl -s --connect-timeout 3 --socks5 "127.0.0.1:${PORT}" \
@@ -481,12 +524,14 @@ for pid in "${VERIFY_PIDS[@]}"; do
 done
 
 for i in $(seq 0 $((WARP_INSTANCES - 1))); do
-    PORT=$((40000 + i))
+    EXTERNAL_PORT=$((WARP_INSTANCE_PORT_BASE + i))
+    INTERNAL_PORT=$((WARP_INTERNAL_PORT_BASE + i))
     if [ -f "${VERIFY_DIR}/${i}" ]; then
-        echo "  Instance ${i}: OK (port ${PORT})"
+        start_instance_port_forward "$EXTERNAL_PORT" "$INTERNAL_PORT"
+        echo "  Instance ${i}: OK (port ${EXTERNAL_PORT})"
         READY_COUNT=$((READY_COUNT + 1))
     else
-        echo "  Instance ${i}: FAILED (port ${PORT} not responding after ${MAX_VERIFY_WAIT}s)"
+        echo "  Instance ${i}: FAILED (internal port ${INTERNAL_PORT} not responding after ${MAX_VERIFY_WAIT}s)"
     fi
 done
 
@@ -497,6 +542,19 @@ if [ "$READY_COUNT" -eq 0 ]; then
     rm -rf "$VERIFY_DIR"
     echo "Error: no WARP instances started successfully. Exiting."
     exit 1
+fi
+
+if ! is_true "$START_GOST"; then
+    : > /tmp/healthy-warp-ports
+    for i in $(seq 0 $((WARP_INSTANCES - 1))); do
+        if [ -f "${VERIFY_DIR}/${i}" ]; then
+            echo "$((WARP_INSTANCE_PORT_BASE + i))" >> /tmp/healthy-warp-ports
+        fi
+    done
+    rm -rf "$VERIFY_DIR"
+    echo "START_GOST is disabled; WARP instances are available on :${WARP_INSTANCE_PORT_BASE}-$((WARP_INSTANCE_PORT_BASE + WARP_INSTANCES - 1))"
+    wait
+    exit 0
 fi
 
 # ---- generate GOST config (only include verified instances) ----

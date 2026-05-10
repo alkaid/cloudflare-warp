@@ -4,13 +4,16 @@ services:
     container_name: warp
     restart: always
     ports:
-      - "1080:1080"                            # SOCKS5 WARP proxy (Cloudflare IP)
+      - "40000:40000"                          # WARP instance 0 SOCKS5 proxy (Cloudflare IP)
+      # - "40001:40001"                        # WARP instance 1 (when WARP_INSTANCES >= 2)
+      # - "1080:1080"                          # GOST SOCKS5 WARP proxy (requires START_GOST=true)
       # - "1081:1081"                          # SOCKS5 Direct proxy (real IP)
       # - "8080:8080"                          # HTTP WARP proxy (Cloudflare IP)
       # - "8081:8081"                          # HTTP Direct proxy (real IP)
       # - "8388:8388"                          # Shadowsocks WARP proxy (for mobile VPN)
       # - "8389:8389"                          # Shadowsocks Direct proxy (for mobile VPN)
     environment:
+      - START_GOST=false                        # start GOST aggregate proxies (default: false)
       # - WARP_INSTANCES=1                       # number of WARP instances (default: 1)
                                                   # each instance gets a unique Cloudflare IP
                                                   # traffic is round-robined across all instances

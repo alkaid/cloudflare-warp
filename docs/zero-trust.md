@@ -31,7 +31,7 @@ services:
   warp:
     image: dublok/cloudflare-warp:latest
     ports:
-      - "1080:1080"
+      - "40000:40000"
     environment:
       - WARP_ORG=my-team-name
       - WARP_AUTH_CLIENT_ID=88bf3b6d86161464f6509f7219099e57.access
@@ -57,10 +57,11 @@ Works with all existing features:
 | Feature | Compatible | Notes |
 |---------|------------|-------|
 | Multi-instance IP rotation | Yes | Each instance enrolls as a separate device |
-| GOST round-robin proxy | Yes | No changes needed |
+| Direct WARP instance ports | Yes | Exposed on 40000+ by default |
+| GOST round-robin proxy | Yes | Set `START_GOST=true` |
 | Proxy auth (`PROXY_USER`/`PROXY_PASS`) | Yes | Independent of WARP enrollment |
-| Shadowsocks | Yes | Independent of WARP enrollment |
-| Direct proxy bypass | Yes | Independent of WARP enrollment |
+| Shadowsocks | Yes | Set `START_GOST=true` |
+| Direct proxy bypass | Yes | Set `START_GOST=true` |
 | Container cleanup on shutdown | Yes | `warp-cli registration delete` frees device slots |
 
 ## Limitations
