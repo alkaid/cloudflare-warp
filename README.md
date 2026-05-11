@@ -1,8 +1,8 @@
 # Cloudflare WARP
 
 [![Build, Test & Push](https://img.shields.io/github/actions/workflow/status/ErcinDedeoglu/cloudflare-warp/build-test-push.yml?branch=v1.0&logo=github&label=Build)](https://github.com/ErcinDedeoglu/cloudflare-warp/actions/workflows/build-test-push.yml)
-[![Docker Pulls](https://img.shields.io/docker/pulls/dublok/cloudflare-warp?logo=docker&label=Pulls)](https://hub.docker.com/r/dublok/cloudflare-warp)
-[![Docker Image Size](https://img.shields.io/docker/image-size/dublok/cloudflare-warp/latest?logo=docker&label=Size)](https://hub.docker.com/r/dublok/cloudflare-warp)
+[![Docker Pulls](https://img.shields.io/docker/pulls/alkaidgo/cloudflare-warp?logo=docker&label=Pulls)](https://hub.docker.com/r/alkaidgo/cloudflare-warp)
+[![Docker Image Size](https://img.shields.io/docker/image-size/alkaidgo/cloudflare-warp/latest?logo=docker&label=Size)](https://hub.docker.com/r/alkaidgo/cloudflare-warp)
 [![GitHub Stars](https://img.shields.io/github/stars/ErcinDedeoglu/cloudflare-warp?logo=github&label=Stars)](https://github.com/ErcinDedeoglu/cloudflare-warp)
 [![License: CC BY-NC 4.0](https://img.shields.io/badge/License-CC%20BY--NC%204.0-blue.svg)](https://github.com/ErcinDedeoglu/cloudflare-warp/blob/v1.0/LICENSE)
 
@@ -13,7 +13,7 @@ Run [Cloudflare WARP](https://1.1.1.1/) in Docker. Provides SOCKS5 and HTTP prox
 ```yaml
 services:
   warp:
-    image: dublok/cloudflare-warp:latest
+    image: alkaidgo/cloudflare-warp:latest
     container_name: warp
     restart: always
     ports:
@@ -63,7 +63,7 @@ If working, you'll see `warp=on` in the output.
 ```yaml
 services:
   warp:
-    image: dublok/cloudflare-warp:latest
+    image: alkaidgo/cloudflare-warp:latest
     ports:
       - "1080:1080"  # SOCKS5 proxy
       - "8080:8080"  # HTTP proxy
@@ -101,7 +101,7 @@ GOST direct proxies exit through Docker's network without routing through WARP. 
 ```yaml
 services:
   warp:
-    image: dublok/cloudflare-warp:latest
+    image: alkaidgo/cloudflare-warp:latest
     ports:
       - "1080:1080"  # SOCKS5 WARP proxy
       - "1081:1081"  # SOCKS5 Direct proxy
@@ -165,7 +165,7 @@ Connect your mobile devices using Shadowsocks apps - works as a system-wide VPN 
 ```yaml
 services:
   warp:
-    image: dublok/cloudflare-warp:latest
+    image: alkaidgo/cloudflare-warp:latest
     ports:
       - "8388:8388"  # Shadowsocks WARP (Cloudflare IP)
       - "8389:8389"  # Shadowsocks Direct (real IP)

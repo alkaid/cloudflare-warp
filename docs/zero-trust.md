@@ -29,7 +29,7 @@ All three must be set together. `WARP_ORG` and `WARP_LICENSE_KEY` are mutually e
 ```yaml
 services:
   warp:
-    image: dublok/cloudflare-warp:latest
+    image: alkaidgo/cloudflare-warp:latest
     ports:
       - "40000:40000"
     environment:

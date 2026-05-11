@@ -1,6 +1,6 @@
 services:
   warp:
-    image: dublok/cloudflare-warp:latest
+    image: alkaidgo/cloudflare-warp:latest
     container_name: warp
     restart: always
     ports:
