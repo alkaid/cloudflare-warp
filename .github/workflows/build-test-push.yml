@@ -6,31 +6,11 @@ name: Build, Test & Push
 
 on:
   push:
-    paths:
-      - 'Dockerfile'
-      - 'docker-compose.yml'
-      - 'entrypoint.sh'
-      - 'start-warp-instance.sh'
-      - 'scripts/**'
-      - 'healthcheck/**'
-      - '.github/workflows/build-test-push.yml'
-  schedule:
-    - cron: '0 0 * * *'
   workflow_dispatch:
-    inputs:
-      start_gost:
-        description: 'Start GOST aggregate proxies during tests'
-        required: true
-        default: 'false'
-        type: choice
-        options:
-          - 'false'
-          - 'true'
 
 env:
   IMAGE_NAME: cloudflare-warp
   TEST_TAG: cloudflare-warp-test:latest
-  START_GOST: ${{ github.event_name == 'workflow_dispatch' && inputs.start_gost || 'false' }}
 
 jobs:
   build-and-test:
@@ -70,19 +50,10 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Test default direct instance ports
-        if: env.START_GOST == 'false'
         env:
           SKIP_BUILD: 'true'
           IMAGE_NAME: cloudflare-warp-test
           START_GOST: 'false'
-        run: ./scripts/test-gost-toggle.sh
-
-      - name: Test GOST aggregate proxies
-        if: env.START_GOST == 'true'
-        env:
-          SKIP_BUILD: 'true'
-          IMAGE_NAME: cloudflare-warp-test
-          START_GOST: 'true'
         run: ./scripts/test-gost-toggle.sh
 
   push:
@@ -107,17 +78,15 @@ jobs:
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_TOKEN }}
 
-      - name: Docker metadata
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: docker.io/${{ secrets.DOCKER_USERNAME }}/${{ env.IMAGE_NAME }}
-          tags: |
-            type=raw,value=latest
-            type=sha,format=short
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=semver,pattern={{major}}
+      - name: Read Docker tags
+        id: version
+        run: |
+          {
+            echo 'tags<<EOF'
+            jq -r --arg image "docker.io/${{ secrets.DOCKER_USERNAME }}/${{ env.IMAGE_NAME }}" \
+              '.tags[] | "\($image):\(.)"' .version_v1.0.json
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
 
       - name: Build and push Docker Hub image
         uses: docker/build-push-action@v6
@@ -126,8 +95,7 @@ jobs:
           file: Dockerfile
           platforms: linux/amd64,linux/arm64
           push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+          tags: ${{ steps.version.outputs.tags }}
           build-args: |
             COMMIT_SHA=${{ github.sha }}
           cache-from: type=gha
