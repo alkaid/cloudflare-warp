@@ -17,6 +17,12 @@ INSTANCE=${1:?"Instance number required"}
 PORT=${2:?"Port number required"}
 LICENSE_KEYS_CSV=${3:-}
 CONNECT_TIMEOUT=${4:-30}
+WARP_HEALTH_INTERVAL=${WARP_HEALTH_INTERVAL:-0}
+WARP_HEALTH_FAILURES=${WARP_HEALTH_FAILURES:-3}
+WARP_RESTART_DELAY=${WARP_RESTART_DELAY:-5}
+WARP_HEALTH_URL=${WARP_HEALTH_URL:-https://cloudflare.com/cdn-cgi/trace}
+WARP_PID=""
+DBUS_PID=""
 
 # Parse license keys
 ALL_KEYS=()
@@ -41,6 +47,61 @@ echo "[Instance ${INSTANCE}]   DATA_DIR=${DATA_DIR}"
 echo "[Instance ${INSTANCE}]   RUN_DIR=${RUN_DIR}"
 echo "[Instance ${INSTANCE}]   DBUS_DIR=${DBUS_DIR}"
 
+is_non_negative_int() {
+    [[ "${1:-}" =~ ^[0-9]+$ ]]
+}
+
+is_positive_int() {
+    [[ "${1:-}" =~ ^[0-9]+$ ]] && [ "$1" -gt 0 ]
+}
+
+if ! is_non_negative_int "$WARP_HEALTH_INTERVAL"; then
+    echo "[Instance ${INSTANCE}] Error: WARP_HEALTH_INTERVAL must be a non-negative integer"
+    exit 1
+fi
+
+if ! is_positive_int "$WARP_HEALTH_FAILURES"; then
+    echo "[Instance ${INSTANCE}] Error: WARP_HEALTH_FAILURES must be a positive integer"
+    exit 1
+fi
+
+if ! is_positive_int "$WARP_RESTART_DELAY"; then
+    echo "[Instance ${INSTANCE}] Error: WARP_RESTART_DELAY must be a positive integer"
+    exit 1
+fi
+
+cleanup_instance() {
+    if [ -n "${WARP_PID:-}" ] && kill -0 "$WARP_PID" 2>/dev/null; then
+        sudo kill "$WARP_PID" 2>/dev/null || true
+        wait "$WARP_PID" 2>/dev/null || true
+    fi
+
+    if [ -n "${DBUS_PID:-}" ] && kill -0 "$DBUS_PID" 2>/dev/null; then
+        sudo kill "$DBUS_PID" 2>/dev/null || true
+        wait "$DBUS_PID" 2>/dev/null || true
+    fi
+}
+
+shutdown_instance() {
+    echo "[Instance ${INSTANCE}] Shutting down..."
+    cleanup_instance
+    exit 0
+}
+
+probe_warp_proxy() {
+    curl -fsS --connect-timeout 5 --max-time 20 --socks5 "127.0.0.1:${PORT}" \
+        "$WARP_HEALTH_URL" 2>/dev/null | grep -qE 'warp=(on|plus)'
+}
+
+restart_instance_script() {
+    echo "[Instance ${INSTANCE}] Restarting in ${WARP_RESTART_DELAY}s..."
+    cleanup_instance
+    sleep "$WARP_RESTART_DELAY"
+    exec "$0" "$INSTANCE" "$PORT" "$LICENSE_KEYS_CSV" "$CONNECT_TIMEOUT"
+}
+
+trap shutdown_instance SIGTERM SIGINT
+
 # Create instance-specific directories
 sudo mkdir -p "$DATA_DIR" "$RUN_DIR" "$DBUS_DIR"
 
@@ -50,6 +111,7 @@ sudo dbus-daemon \
     --address="unix:path=${DBUS_SOCK}" \
     --config-file=/usr/share/dbus-1/system.conf \
     --nopidfile --nofork >/dev/null 2>&1 &
+DBUS_PID=$!
 sleep 1
 
 # Write MDM config for Zero Trust (must happen before warp-svc reads data dir)
@@ -112,7 +174,7 @@ if [ "$ZT_MODE" = true ]; then
     # MDM sets service_mode=proxy and proxy_port; connect as safety net.
     echo "[Instance ${INSTANCE}] Zero Trust mode: waiting for automatic enrollment..."
     wcli connect 2>/dev/null || true
-    wcli debug qlog disable
+    wcli debug qlog disable || true
     echo "[Instance ${INSTANCE}] WARP Zero Trust proxy active on localhost:${PORT}"
 else
     # Register and apply license (tries preferred key first, falls back to others)
@@ -175,10 +237,42 @@ else
     wcli mode proxy
     wcli proxy port "$PORT"
     wcli connect
-    wcli debug qlog disable
+    wcli debug qlog disable || true
 
     echo "[Instance ${INSTANCE}] WARP proxy active on localhost:${PORT}"
 fi
 
-# Keep the script alive as long as warp-svc is running
-wait $WARP_PID
+if [ "$WARP_HEALTH_INTERVAL" -eq 0 ]; then
+    wait "$WARP_PID" || restart_instance_script
+    restart_instance_script
+fi
+
+FAILURES=0
+while true; do
+    if ! kill -0 "$WARP_PID" 2>/dev/null; then
+        wait "$WARP_PID" 2>/dev/null || true
+        echo "[Instance ${INSTANCE}] warp-svc exited"
+        restart_instance_script
+    fi
+
+    sleep "$WARP_HEALTH_INTERVAL"
+
+    if probe_warp_proxy; then
+        if [ "$FAILURES" -gt 0 ]; then
+            echo "[Instance ${INSTANCE}] Health recovered"
+        fi
+        FAILURES=0
+        continue
+    fi
+
+    FAILURES=$((FAILURES + 1))
+    echo "[Instance ${INSTANCE}] Health probe failed (${FAILURES}/${WARP_HEALTH_FAILURES})"
+
+    if [ "$FAILURES" -lt "$WARP_HEALTH_FAILURES" ]; then
+        wcli connect >/dev/null 2>&1 || true
+        continue
+    fi
+
+    echo "[Instance ${INSTANCE}] Unhealthy after ${FAILURES} consecutive probes"
+    restart_instance_script
+done

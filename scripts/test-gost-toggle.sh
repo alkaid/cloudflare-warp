@@ -13,6 +13,58 @@ INSTANCE_PORT=${INSTANCE_PORT:-40000}
 GOST_SOCKS_PORT=${GOST_SOCKS_PORT:-1080}
 GOST_HTTP_PORT=${GOST_HTTP_PORT:-8080}
 
+test_healthcheck_aggregation() {
+    local tmp_dir fake_bin ports_file output_file
+    tmp_dir=$(mktemp -d)
+    fake_bin="${tmp_dir}/bin"
+    ports_file="${tmp_dir}/healthy-warp-ports"
+    output_file="${tmp_dir}/healthcheck.out"
+    mkdir -p "$fake_bin"
+
+    cat > "${fake_bin}/curl" <<'EOF'
+#!/bin/bash
+
+for arg in "$@"; do
+    case "$arg" in
+        127.0.0.1:40000|127.0.0.1:40001)
+            echo "warp=on"
+            exit 0
+            ;;
+        127.0.0.1:40002)
+            echo "warp=off"
+            exit 0
+            ;;
+    esac
+done
+
+exit 1
+EOF
+    chmod +x "${fake_bin}/curl"
+
+    printf "%s\n" 40000 40001 40002 > "$ports_file"
+
+    if PATH="${fake_bin}:$PATH" WARP_HEALTHCHECK_PORTS_FILE="$ports_file" \
+        bash ./healthcheck/connected-to-warp.sh >"$output_file" 2>&1; then
+        echo "Expected healthcheck to fail when one configured port is unhealthy"
+        cat "$output_file"
+        rm -rf "$tmp_dir"
+        exit 1
+    fi
+
+    if ! grep -q "2/3 healthy; required 3; failed ports: 40002" "$output_file"; then
+        echo "Unexpected healthcheck failure output"
+        cat "$output_file"
+        rm -rf "$tmp_dir"
+        exit 1
+    fi
+
+    PATH="${fake_bin}:$PATH" WARP_HEALTHCHECK_PORTS_FILE="$ports_file" \
+        WARP_HEALTHCHECK_MIN_HEALTHY=2 bash ./healthcheck/connected-to-warp.sh
+
+    rm -rf "$tmp_dir"
+    echo "Healthcheck aggregation test passed"
+}
+
 is_true() {
     case "${1:-}" in
         1|true|TRUE|yes|YES|on|ON) return 0 ;;
@@ -26,6 +78,14 @@ cleanup() {
 }
 
 trap cleanup EXIT
+
+echo "Testing healthcheck aggregation"
+test_healthcheck_aggregation
+
+if is_true "${HEALTHCHECK_ONLY:-false}"; then
+    echo "HEALTHCHECK_ONLY=true; skipping Docker integration test"
+    exit 0
+fi
 
 echo "Building test image: ${IMAGE_NAME}:latest"
 if [ "${SKIP_BUILD:-false}" = "true" ]; then

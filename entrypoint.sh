@@ -13,7 +13,18 @@ WARP_INSTANCES=${WARP_INSTANCES:-1}
 START_GOST=${START_GOST:-false}
 WARP_INSTANCE_PORT_BASE=${WARP_INSTANCE_PORT_BASE:-40000}
 WARP_INTERNAL_PORT_BASE=${WARP_INTERNAL_PORT_BASE:-41000}
+WARP_HEALTH_INTERVAL=${WARP_HEALTH_INTERVAL:-0}
+WARP_HEALTH_FAILURES=${WARP_HEALTH_FAILURES:-3}
+WARP_HEALTH_URL=${WARP_HEALTH_URL:-https://cloudflare.com/cdn-cgi/trace}
+WARP_SUPERVISOR_INTERVAL=${WARP_SUPERVISOR_INTERVAL:-30}
+WARP_SUPERVISOR_PID_DIR=${WARP_SUPERVISOR_PID_DIR:-/tmp/warp-supervisor}
+SUPERVISOR_PID=""
+GOST_PID=""
 SOCAT_PIDS=()
+SOCAT_EXTERNAL_PORTS=()
+SOCAT_INTERNAL_PORTS=()
+INSTANCE_PIDS=()
+INSTANCE_INTERNAL_PORTS=()
 
 is_true() {
     case "${1:-}" in
@@ -25,10 +36,156 @@ is_true() {
 start_instance_port_forward() {
     local external_port="$1"
     local internal_port="$2"
+    local index=${3:-${#SOCAT_PIDS[@]}}
 
+    mkdir -p "$WARP_SUPERVISOR_PID_DIR"
     echo "Exposing WARP instance port on 0.0.0.0:${external_port} -> 127.0.0.1:${internal_port}"
     socat "TCP-LISTEN:${external_port},fork,reuseaddr,bind=0.0.0.0" "TCP:127.0.0.1:${internal_port}" &
-    SOCAT_PIDS+=($!)
+    SOCAT_PIDS[$index]=$!
+    SOCAT_EXTERNAL_PORTS[$index]=$external_port
+    SOCAT_INTERNAL_PORTS[$index]=$internal_port
+    printf "%s\n" "$!" > "${WARP_SUPERVISOR_PID_DIR}/socat-${index}.pid"
+}
+
+start_warp_instance_process() {
+    local instance="$1"
+    local internal_port="$2"
+
+    mkdir -p "$WARP_SUPERVISOR_PID_DIR"
+    /start-warp-instance.sh \
+        "$instance" "$internal_port" "$LICENSE_KEYS_CSV" "${WARP_CONNECT_TIMEOUT:-30}" &
+    INSTANCE_PIDS[$instance]=$!
+    INSTANCE_INTERNAL_PORTS[$instance]=$internal_port
+    printf "%s\n" "$!" > "${WARP_SUPERVISOR_PID_DIR}/instance-${instance}.pid"
+}
+
+supervise_multi_instance_children() {
+    while true; do
+        sleep "$WARP_SUPERVISOR_INTERVAL"
+
+        for i in $(seq 0 $((WARP_INSTANCES - 1))); do
+            local pid="${INSTANCE_PIDS[$i]:-}"
+            local pid_file="${WARP_SUPERVISOR_PID_DIR}/instance-${i}.pid"
+            local internal_port="${INSTANCE_INTERNAL_PORTS[$i]:-$((WARP_INTERNAL_PORT_BASE + i))}"
+
+            if [ -f "$pid_file" ]; then
+                pid=$(cat "$pid_file" 2>/dev/null || true)
+            fi
+
+            if [ -z "$pid" ] || ! kill -0 "$pid" 2>/dev/null; then
+                if [ -n "$pid" ]; then
+                    wait "$pid" 2>/dev/null || true
+                fi
+                echo "[Supervisor] Instance ${i} process exited; restarting"
+                start_warp_instance_process "$i" "$internal_port"
+            fi
+        done
+
+        for i in "${!SOCAT_PIDS[@]}"; do
+            local pid="${SOCAT_PIDS[$i]:-}"
+            local pid_file="${WARP_SUPERVISOR_PID_DIR}/socat-${i}.pid"
+            local external_port="${SOCAT_EXTERNAL_PORTS[$i]:-}"
+            local internal_port="${SOCAT_INTERNAL_PORTS[$i]:-}"
+
+            if [ -f "$pid_file" ]; then
+                pid=$(cat "$pid_file" 2>/dev/null || true)
+            fi
+
+            if [ -z "$external_port" ] || [ -z "$internal_port" ]; then
+                continue
+            fi
+
+            if [ -z "$pid" ] || ! kill -0 "$pid" 2>/dev/null; then
+                if [ -n "$pid" ]; then
+                    wait "$pid" 2>/dev/null || true
+                fi
+                echo "[Supervisor] Port forward ${external_port}->${internal_port} exited; restarting"
+                start_instance_port_forward "$external_port" "$internal_port" "$i"
+            fi
+        done
+    done
+}
+
+supervise_single_instance() {
+    local warp_pid="$1"
+    local external_port="$2"
+    local failures=0
+
+    while true; do
+        if [ "$WARP_HEALTH_INTERVAL" -eq 0 ]; then
+            sleep 5
+        else
+            sleep "$WARP_HEALTH_INTERVAL"
+        fi
+
+        if ! kill -0 "$warp_pid" 2>/dev/null; then
+            wait "$warp_pid" 2>/dev/null || true
+            echo "[Supervisor] Single WARP daemon exited; stopping container for restart"
+            kill -TERM "$$" 2>/dev/null || true
+            exit 1
+        fi
+
+        if [ "$WARP_HEALTH_INTERVAL" -eq 0 ]; then
+            continue
+        fi
+
+        if curl -fsS --connect-timeout 5 --max-time 20 --socks5-hostname "127.0.0.1:${external_port}" \
+            "$WARP_HEALTH_URL" 2>/dev/null | grep -qE 'warp=(on|plus)'; then
+            if [ "$failures" -gt 0 ]; then
+                echo "[Supervisor] Single WARP health recovered"
+            fi
+            failures=0
+            continue
+        fi
+
+        failures=$((failures + 1))
+        echo "[Supervisor] Single WARP health probe failed (${failures}/${WARP_HEALTH_FAILURES})"
+        warp-cli --accept-tos connect >/dev/null 2>&1 || true
+
+        if [ "$failures" -ge "$WARP_HEALTH_FAILURES" ]; then
+            echo "[Supervisor] Single WARP unhealthy; stopping container for restart"
+            kill -TERM "$$" 2>/dev/null || true
+            exit 1
+        fi
+    done
+}
+
+cleanup_multi_instance() {
+    echo "Shutting down ${WARP_INSTANCES} WARP instances..."
+    kill "${SUPERVISOR_PID:-}" 2>/dev/null || true
+
+    # Deregister devices so they don't count against the WARP+ per-key limit
+    # (or Zero Trust's 50-device limit). Without this, each container recreation
+    # would leave orphaned device registrations on Cloudflare's side.
+    for i in $(seq 0 $((WARP_INSTANCES - 1))); do
+        local run="/run/warp-${i}"
+        local dbus="/run/dbus-${i}/system_bus_socket"
+        sudo env RUNTIME_DIRECTORY="$run" DBUS_SYSTEM_BUS_ADDRESS="unix:path=${dbus}" \
+            warp-cli --accept-tos registration delete 2>/dev/null || true
+    done
+
+    for pid in "${INSTANCE_PIDS[@]}"; do
+        sudo kill "$pid" 2>/dev/null || true
+    done
+    for pid_file in "${WARP_SUPERVISOR_PID_DIR}"/instance-*.pid; do
+        [ -f "$pid_file" ] || continue
+        local pid
+        pid=$(cat "$pid_file" 2>/dev/null || true)
+        [ -n "$pid" ] && sudo kill "$pid" 2>/dev/null || true
+    done
+
+    for pid in "${SOCAT_PIDS[@]}"; do
+        kill "$pid" 2>/dev/null || true
+    done
+    for pid_file in "${WARP_SUPERVISOR_PID_DIR}"/socat-*.pid; do
+        [ -f "$pid_file" ] || continue
+        local pid
+        pid=$(cat "$pid_file" 2>/dev/null || true)
+        [ -n "$pid" ] && kill "$pid" 2>/dev/null || true
+    done
+
+    kill "${GOST_PID:-}" 2>/dev/null || true
+    wait
 }
 
 # Validate WARP_INSTANCES
@@ -44,6 +201,21 @@ fi
 
 if ! [[ "$WARP_INTERNAL_PORT_BASE" =~ ^[0-9]+$ ]] || [ "$WARP_INTERNAL_PORT_BASE" -lt 1024 ]; then
     echo "Error: WARP_INTERNAL_PORT_BASE must be an integer >= 1024"
+    exit 1
+fi
+
+if ! [[ "$WARP_HEALTH_INTERVAL" =~ ^[0-9]+$ ]]; then
+    echo "Error: WARP_HEALTH_INTERVAL must be a non-negative integer"
+    exit 1
+fi
+
+if ! [[ "$WARP_HEALTH_FAILURES" =~ ^[0-9]+$ ]] || [ "$WARP_HEALTH_FAILURES" -lt 1 ]; then
+    echo "Error: WARP_HEALTH_FAILURES must be a positive integer"
+    exit 1
+fi
+
+if ! [[ "$WARP_SUPERVISOR_INTERVAL" =~ ^[0-9]+$ ]] || [ "$WARP_SUPERVISOR_INTERVAL" -lt 1 ]; then
+    echo "Error: WARP_SUPERVISOR_INTERVAL must be a positive integer"
     exit 1
 fi
 
@@ -221,14 +393,17 @@ if [ "$WARP_INSTANCES" -eq 1 ]; then
     fi
 
     # disable qlog
-    warp-cli --accept-tos debug qlog disable
+    warp-cli --accept-tos debug qlog disable || true
 
     start_instance_port_forward "$EXTERNAL_PORT" "$INTERNAL_PORT"
     printf "%s\n" "$EXTERNAL_PORT" > /tmp/healthy-warp-ports
+    supervise_single_instance "$WARP_PID" "$EXTERNAL_PORT" &
+    SUPERVISOR_PID=$!
 
     if ! is_true "$START_GOST"; then
         echo "START_GOST is disabled; WARP instance is available on :${EXTERNAL_PORT}"
         wait "$WARP_PID"
+        kill "$SUPERVISOR_PID" 2>/dev/null || true
         exit 0
     fi
 
@@ -484,12 +659,9 @@ EOF
 }
 
 # ---- start each WARP instance with isolated paths ----
-INSTANCE_PIDS=()
 for i in $(seq 0 $((WARP_INSTANCES - 1))); do
     PORT=$((WARP_INTERNAL_PORT_BASE + i))
-    /start-warp-instance.sh \
-        "$i" "$PORT" "$LICENSE_KEYS_CSV" "${WARP_CONNECT_TIMEOUT:-30}" &
-    INSTANCE_PIDS+=($!)
+    start_warp_instance_process "$i" "$PORT"
     sleep $((5 + RANDOM % 5))  # stagger with jitter (5-9s) to avoid Cloudflare API rate-limiting
 done
 
@@ -527,7 +699,7 @@ for i in $(seq 0 $((WARP_INSTANCES - 1))); do
     EXTERNAL_PORT=$((WARP_INSTANCE_PORT_BASE + i))
     INTERNAL_PORT=$((WARP_INTERNAL_PORT_BASE + i))
     if [ -f "${VERIFY_DIR}/${i}" ]; then
-        start_instance_port_forward "$EXTERNAL_PORT" "$INTERNAL_PORT"
+        start_instance_port_forward "$EXTERNAL_PORT" "$INTERNAL_PORT" "$i"
         echo "  Instance ${i}: OK (port ${EXTERNAL_PORT})"
         READY_COUNT=$((READY_COUNT + 1))
     else
@@ -553,6 +725,9 @@ if ! is_true "$START_GOST"; then
     done
     rm -rf "$VERIFY_DIR"
     echo "START_GOST is disabled; WARP instances are available on :${WARP_INSTANCE_PORT_BASE}-$((WARP_INSTANCE_PORT_BASE + WARP_INSTANCES - 1))"
+    trap cleanup_multi_instance SIGTERM SIGINT
+    supervise_multi_instance_children &
+    SUPERVISOR_PID=$!
     wait
     exit 0
 fi
@@ -576,25 +751,10 @@ fi
 echo "========================================================="
 echo ""
 
-# ---- cleanup on shutdown ----
-cleanup() {
-    echo "Shutting down ${WARP_INSTANCES} WARP instances..."
-    # Deregister devices so they don't count against the WARP+ per-key limit
-    # (or Zero Trust's 50-device limit). Without this, each container recreation
-    # would leave orphaned device registrations on Cloudflare's side.
-    for i in $(seq 0 $((WARP_INSTANCES - 1))); do
-        local run="/run/warp-${i}"
-        local dbus="/run/dbus-${i}/system_bus_socket"
-        sudo env RUNTIME_DIRECTORY="$run" DBUS_SYSTEM_BUS_ADDRESS="unix:path=${dbus}" \
-            warp-cli --accept-tos registration delete 2>/dev/null || true
-    done
-    for pid in "${INSTANCE_PIDS[@]}"; do
-        sudo kill "$pid" 2>/dev/null || true
-    done
-    kill "$GOST_PID" 2>/dev/null || true
-    wait
-}
-trap cleanup SIGTERM SIGINT
+trap cleanup_multi_instance SIGTERM SIGINT
+
+supervise_multi_instance_children &
+SUPERVISOR_PID=$!
 
 # ---- start GOST (foreground keeps container alive) ----
 echo "Starting GOST proxy (round-robin across ${READY_COUNT} instances)..."
