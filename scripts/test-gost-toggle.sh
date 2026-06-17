@@ -65,6 +65,183 @@ EOF
     echo "Healthcheck aggregation test passed"
 }
 
+test_active_health_restart() {
+    local tmp_dir fake_bin output_file curl_log
+    tmp_dir=$(mktemp -d)
+    fake_bin="${tmp_dir}/bin"
+    output_file="${tmp_dir}/active-health.out"
+    curl_log="${tmp_dir}/curl.log"
+    mkdir -p "$fake_bin"
+
+    cat > "${fake_bin}/sudo" <<'EOF'
+#!/bin/bash
+
+case "${1:-}" in
+    mkdir)
+        exit 0
+        ;;
+    kill)
+        shift
+        /bin/kill "$@" 2>/dev/null || true
+        exit 0
+        ;;
+esac
+
+exec "$@"
+EOF
+
+    cat > "${fake_bin}/dbus-daemon" <<'EOF'
+#!/bin/bash
+trap 'exit 0' TERM INT
+while true; do /bin/sleep 60 & wait "$!"; done
+EOF
+
+    cat > "${fake_bin}/warp-svc" <<'EOF'
+#!/bin/bash
+trap 'exit 0' TERM INT
+while true; do /bin/sleep 60 & wait "$!"; done
+EOF
+
+    cat > "${fake_bin}/warp-cli" <<'EOF'
+#!/bin/bash
+if [[ "$*" == *status* ]]; then
+    echo "Status: Connected"
+fi
+exit 0
+EOF
+
+    cat > "${fake_bin}/curl" <<EOF
+#!/bin/bash
+echo "\$*" >> "$curl_log"
+echo "warp=off"
+exit 0
+EOF
+
+    cat > "${fake_bin}/sleep" <<'EOF'
+#!/bin/bash
+if [ "${1:-}" = "7" ]; then
+    exit 42
+fi
+exit 0
+EOF
+
+    chmod +x "${fake_bin}"/*
+
+    set +e
+    PATH="${fake_bin}:$PATH" WARP_HEALTH_INTERVAL=1 WARP_HEALTH_FAILURES=2 \
+        WARP_RESTART_DELAY=7 bash ./start-warp-instance.sh 0 40000 "" 2 \
+        >"$output_file" 2>&1
+    local status=$?
+    set -e
+
+    if [ "$status" -ne 42 ]; then
+        echo "Expected active health restart path to reach restart delay"
+        cat "$output_file"
+        rm -rf "$tmp_dir"
+        exit 1
+    fi
+
+    if ! grep -q "Health probe failed (2/2)" "$output_file"; then
+        echo "Expected consecutive health failures before restart"
+        cat "$output_file"
+        rm -rf "$tmp_dir"
+        exit 1
+    fi
+
+    if ! grep -q -- "--socks5-hostname 127.0.0.1:40000" "$curl_log"; then
+        echo "Expected active health probe to use --socks5-hostname"
+        cat "$curl_log"
+        rm -rf "$tmp_dir"
+        exit 1
+    fi
+
+    rm -rf "$tmp_dir"
+    echo "Active health restart test passed"
+}
+
+test_active_health_disabled() {
+    local tmp_dir fake_bin output_file curl_log
+    tmp_dir=$(mktemp -d)
+    fake_bin="${tmp_dir}/bin"
+    output_file="${tmp_dir}/active-health-disabled.out"
+    curl_log="${tmp_dir}/curl.log"
+    mkdir -p "$fake_bin"
+
+    cat > "${fake_bin}/sudo" <<'EOF'
+#!/bin/bash
+
+case "${1:-}" in
+    mkdir)
+        exit 0
+        ;;
+    kill)
+        shift
+        /bin/kill "$@" 2>/dev/null || true
+        exit 0
+        ;;
+esac
+
+exec "$@"
+EOF
+
+    cat > "${fake_bin}/dbus-daemon" <<'EOF'
+#!/bin/bash
+trap 'exit 0' TERM INT
+while true; do /bin/sleep 60 & wait "$!"; done
+EOF
+
+    cat > "${fake_bin}/warp-svc" <<'EOF'
+#!/bin/bash
+trap 'exit 0' TERM INT
+while true; do /bin/sleep 60 & wait "$!"; done
+EOF
+
+    cat > "${fake_bin}/warp-cli" <<'EOF'
+#!/bin/bash
+if [[ "$*" == *status* ]]; then
+    echo "Status: Connected"
+fi
+exit 0
+EOF
+
+    cat > "${fake_bin}/curl" <<EOF
+#!/bin/bash
+echo "\$*" >> "$curl_log"
+echo "warp=off"
+exit 0
+EOF
+
+    cat > "${fake_bin}/sleep" <<'EOF'
+#!/bin/bash
+exit 0
+EOF
+
+    chmod +x "${fake_bin}"/*
+
+    set +e
+    PATH="${fake_bin}:$PATH" WARP_HEALTH_INTERVAL=0 timeout 2s \
+        bash ./start-warp-instance.sh 0 40000 "" 2 >"$output_file" 2>&1
+    local status=$?
+    set -e
+
+    if [ "$status" -ne 124 ]; then
+        echo "Expected disabled active health run to wait for warp-svc until timeout"
+        cat "$output_file"
+        rm -rf "$tmp_dir"
+        exit 1
+    fi
+
+    if [ -s "$curl_log" ]; then
+        echo "Expected WARP_HEALTH_INTERVAL=0 to skip content health probes"
+        cat "$curl_log"
+        rm -rf "$tmp_dir"
+        exit 1
+    fi
+
+    rm -rf "$tmp_dir"
+    echo "Active health disabled test passed"
+}
+
 is_true() {
     case "${1:-}" in
         1|true|TRUE|yes|YES|on|ON) return 0 ;;
@@ -81,6 +258,10 @@ trap cleanup EXIT
 
 echo "Testing healthcheck aggregation"
 test_healthcheck_aggregation
+echo "Testing active health restart"
+test_active_health_restart
+echo "Testing active health disabled mode"
+test_active_health_disabled
 
 if is_true "${HEALTHCHECK_ONLY:-false}"; then
     echo "HEALTHCHECK_ONLY=true; skipping Docker integration test"

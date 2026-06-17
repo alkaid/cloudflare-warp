@@ -55,6 +55,8 @@ RUN mkdir -p /home/warp/.local/share/warp && \
 ENV WARP_INSTANCES=1
 ENV START_GOST=false
 ENV WARP_CONNECT_TIMEOUT=30
+ENV WARP_HEALTH_INTERVAL=60
+ENV WARP_HEALTH_FAILURES=3
 ENV PROXY_USER=
 ENV PROXY_PASS=
 ENV PROXY_MAX_CONN=10
@@ -62,7 +64,7 @@ ENV PROXY_MAX_RPS=10
 ENV PROXY_ALLOWED_IPS=
 ENV SS_METHOD=chacha20-ietf-poly1305
 
-HEALTHCHECK --interval=15s --timeout=5s --start-period=120s --retries=3 \
+HEALTHCHECK --interval=15s --timeout=15s --start-period=120s --retries=3 \
   CMD /healthcheck/index.sh
 
 ENTRYPOINT ["/entrypoint.sh"]

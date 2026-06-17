@@ -19,6 +19,9 @@ services:
                                                   # traffic is round-robined across all instances
       # - WARP_LICENSE_KEY=your-key              # WARP+ license key (comma-separated for multiple)
       # - WARP_CONNECT_TIMEOUT=30                # max seconds to wait for WARP daemon
+      # - WARP_HEALTH_INTERVAL=60                # active content health probe interval; 0 disables
+      # - WARP_HEALTH_FAILURES=3                 # restart an instance after this many failed probes
+      # - WARP_HEALTHCHECK_MIN_HEALTHY=1         # allow Docker healthcheck to pass with partial capacity
       # - PROXY_USER=myuser                      # proxy authentication username
       # - PROXY_PASS=mypassword                  # proxy authentication password
       # - PROXY_ALLOWED_IPS=192.168.1.0/24       # IP whitelist (comma-separated CIDRs)
