@@ -17,7 +17,7 @@ INSTANCE=${1:?"Instance number required"}
 PORT=${2:?"Port number required"}
 LICENSE_KEYS_CSV=${3:-}
 CONNECT_TIMEOUT=${4:-30}
-WARP_HEALTH_INTERVAL=${WARP_HEALTH_INTERVAL:-0}
+WARP_HEALTH_INTERVAL=${WARP_HEALTH_INTERVAL:-60}
 WARP_HEALTH_FAILURES=${WARP_HEALTH_FAILURES:-3}
 WARP_RESTART_DELAY=${WARP_RESTART_DELAY:-5}
 WARP_HEALTH_URL=${WARP_HEALTH_URL:-https://cloudflare.com/cdn-cgi/trace}
@@ -89,7 +89,7 @@ shutdown_instance() {
 }
 
 probe_warp_proxy() {
-    curl -fsS --connect-timeout 5 --max-time 20 --socks5 "127.0.0.1:${PORT}" \
+    curl -fsS --connect-timeout 5 --max-time 20 --socks5-hostname "127.0.0.1:${PORT}" \
         "$WARP_HEALTH_URL" 2>/dev/null | grep -qE 'warp=(on|plus)'
 }
 

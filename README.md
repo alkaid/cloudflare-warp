@@ -51,6 +51,9 @@ If working, you'll see `warp=on` in the output.
 | `WARP_AUTH_CLIENT_ID` | Service token Client ID (required when `WARP_ORG` is set) | - |
 | `WARP_AUTH_CLIENT_SECRET` | Service token Client Secret (required when `WARP_ORG` is set) | - |
 | `WARP_CONNECT_TIMEOUT` | Max seconds to wait for WARP daemon | `30` |
+| `WARP_HEALTH_INTERVAL` | Seconds between active WARP content health probes. Set to `0` to disable automatic restart recovery | `60` |
+| `WARP_HEALTH_FAILURES` | Consecutive active health probe failures before restarting a WARP instance | `3` |
+| `WARP_HEALTHCHECK_MIN_HEALTHY` | Minimum healthy direct instance ports required for Docker healthcheck success. Defaults to all planned instance ports | all ports |
 | `PROXY_USER` | Proxy authentication username | - |
 | `PROXY_PASS` | Proxy authentication password | - |
 | `PROXY_ALLOWED_IPS` | IP whitelist (comma-separated CIDRs) | - |
@@ -141,7 +144,7 @@ environment:
   - WARP_INSTANCES=10    # each request exits through a different IP
 ```
 
-Each instance is exposed directly on `40000+N` (for example, instance 0 is `40000`, instance 1 is `40001`). If `START_GOST=true`, GOST also provides round-robin aggregate proxies on 1080/8080/8388. Each instance uses ~50-100 MB RAM and starts 2 seconds apart. If an instance fails, GOST skips it after 3 failures and retries after 30s.
+Each instance is exposed directly on `40000+N` (for example, instance 0 is `40000`, instance 1 is `40001`). If `START_GOST=true`, GOST also provides round-robin aggregate proxies on 1080/8080/8388. Each instance uses ~50-100 MB RAM and starts 2 seconds apart. Active health recovery probes every instance every 60 seconds by default and restarts an instance after 3 consecutive content health failures. If an instance fails, GOST skips it after 3 failures and retries after 30s.
 
 ## Zero Trust (Free WARP+ Routing)
 

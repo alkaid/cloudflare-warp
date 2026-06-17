@@ -13,7 +13,7 @@ WARP_INSTANCES=${WARP_INSTANCES:-1}
 START_GOST=${START_GOST:-false}
 WARP_INSTANCE_PORT_BASE=${WARP_INSTANCE_PORT_BASE:-40000}
 WARP_INTERNAL_PORT_BASE=${WARP_INTERNAL_PORT_BASE:-41000}
-WARP_HEALTH_INTERVAL=${WARP_HEALTH_INTERVAL:-0}
+WARP_HEALTH_INTERVAL=${WARP_HEALTH_INTERVAL:-60}
 WARP_HEALTH_FAILURES=${WARP_HEALTH_FAILURES:-3}
 WARP_HEALTH_URL=${WARP_HEALTH_URL:-https://cloudflare.com/cdn-cgi/trace}
 WARP_SUPERVISOR_INTERVAL=${WARP_SUPERVISOR_INTERVAL:-30}
@@ -505,34 +505,31 @@ echo "========================================"
 echo ""
 
 # ---- helper: generate GOST YAML config for round-robin ----
-# $1 = verify_dir  — directory with per-instance verification results
 generate_gost_config() {
-    local verify_dir="$1"
     local config_file="/tmp/gost-config.yaml"
     local ss_pass="${PROXY_PASS:-cloudflare-warp}"
     local ss_method="${SS_METHOD:-chacha20-ietf-poly1305}"
     local climiter_val="${PROXY_MAX_CONN:-10}"
     local rlimiter_val="${PROXY_MAX_RPS:-10}"
 
-    # --- chain node list (only verified instances) ---
+    # --- chain node list (all planned instance ports) ---
     local nodes=""
-    local healthy_ports=""
+    local planned_ports=""
     for i in $(seq 0 $((WARP_INSTANCES - 1))); do
-        if [ -f "${verify_dir}/${i}" ]; then
-            local port=$((WARP_INSTANCE_PORT_BASE + i))
-            nodes="${nodes}
+        local port=$((WARP_INSTANCE_PORT_BASE + i))
+        nodes="${nodes}
     - name: warp-${i}
       addr: 127.0.0.1:${port}
       connector:
         type: socks5
       dialer:
         type: tcp"
-            healthy_ports="${healthy_ports}${port}\n"
-        fi
+        planned_ports="${planned_ports}${port}\n"
     done
 
-    # Persist healthy ports for the healthcheck script
-    printf "%b" "$healthy_ports" > /tmp/healthy-warp-ports
+    # Persist planned ports for the healthcheck script. GOST will skip failed
+    # nodes and retry them; the healthcheck reports how many planned ports work.
+    printf "%b" "$planned_ports" > /tmp/healthy-warp-ports
 
     # --- proxy auth block (SOCKS5 / HTTP handlers) ---
     local proxy_auth=""
@@ -660,8 +657,10 @@ EOF
 
 # ---- start each WARP instance with isolated paths ----
 for i in $(seq 0 $((WARP_INSTANCES - 1))); do
-    PORT=$((WARP_INTERNAL_PORT_BASE + i))
-    start_warp_instance_process "$i" "$PORT"
+    INTERNAL_PORT=$((WARP_INTERNAL_PORT_BASE + i))
+    EXTERNAL_PORT=$((WARP_INSTANCE_PORT_BASE + i))
+    start_warp_instance_process "$i" "$INTERNAL_PORT"
+    start_instance_port_forward "$EXTERNAL_PORT" "$INTERNAL_PORT" "$i"
     sleep $((5 + RANDOM % 5))  # stagger with jitter (5-9s) to avoid Cloudflare API rate-limiting
 done
 
@@ -678,7 +677,7 @@ for i in $(seq 0 $((WARP_INSTANCES - 1))); do
         PORT=$((WARP_INTERNAL_PORT_BASE + i))
         WAIT=0
         while [ "$WAIT" -lt "$MAX_VERIFY_WAIT" ]; do
-            if curl -s --connect-timeout 3 --socks5 "127.0.0.1:${PORT}" \
+            if curl -s --connect-timeout 3 --socks5-hostname "127.0.0.1:${PORT}" \
                 "https://cloudflare.com/cdn-cgi/trace" 2>/dev/null | grep -qE 'warp=(on|plus)'; then
                 echo "OK" > "${VERIFY_DIR}/${i}"
                 exit 0
@@ -699,7 +698,6 @@ for i in $(seq 0 $((WARP_INSTANCES - 1))); do
     EXTERNAL_PORT=$((WARP_INSTANCE_PORT_BASE + i))
     INTERNAL_PORT=$((WARP_INTERNAL_PORT_BASE + i))
     if [ -f "${VERIFY_DIR}/${i}" ]; then
-        start_instance_port_forward "$EXTERNAL_PORT" "$INTERNAL_PORT" "$i"
         echo "  Instance ${i}: OK (port ${EXTERNAL_PORT})"
         READY_COUNT=$((READY_COUNT + 1))
     else
@@ -719,9 +717,7 @@ fi
 if ! is_true "$START_GOST"; then
     : > /tmp/healthy-warp-ports
     for i in $(seq 0 $((WARP_INSTANCES - 1))); do
-        if [ -f "${VERIFY_DIR}/${i}" ]; then
-            echo "$((WARP_INSTANCE_PORT_BASE + i))" >> /tmp/healthy-warp-ports
-        fi
+        echo "$((WARP_INSTANCE_PORT_BASE + i))" >> /tmp/healthy-warp-ports
     done
     rm -rf "$VERIFY_DIR"
     echo "START_GOST is disabled; WARP instances are available on :${WARP_INSTANCE_PORT_BASE}-$((WARP_INSTANCE_PORT_BASE + WARP_INSTANCES - 1))"
@@ -732,8 +728,8 @@ if ! is_true "$START_GOST"; then
     exit 0
 fi
 
-# ---- generate GOST config (only include verified instances) ----
-generate_gost_config "$VERIFY_DIR"
+# ---- generate GOST config (include all planned instances) ----
+generate_gost_config
 rm -rf "$VERIFY_DIR"
 
 # ---- summary ----
@@ -757,7 +753,7 @@ supervise_multi_instance_children &
 SUPERVISOR_PID=$!
 
 # ---- start GOST (foreground keeps container alive) ----
-echo "Starting GOST proxy (round-robin across ${READY_COUNT} instances)..."
+echo "Starting GOST proxy (round-robin across ${WARP_INSTANCES} planned instances; ${READY_COUNT} verified at startup)..."
 gost -C /tmp/gost-config.yaml &
 GOST_PID=$!
 

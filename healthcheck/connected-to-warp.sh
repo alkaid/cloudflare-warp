@@ -3,9 +3,9 @@
 # Check WARP connection directly through WARP's internal proxy.
 # This bypasses GOST authentication for healthcheck purposes.
 #
-# In multi-instance mode, /tmp/healthy-warp-ports lists the ports that
-# passed verification at startup.  Check every listed port by default so
-# partial instance loss is visible instead of hidden by one surviving instance.
+# In multi-instance mode, /tmp/healthy-warp-ports lists the planned direct
+# instance ports. Check every listed port by default so partial instance loss is
+# visible instead of hidden by one surviving instance.
 # Falls back to port 40000 for single-instance mode.
 
 set -e
@@ -34,12 +34,34 @@ if ! [[ "$MIN_HEALTHY" =~ ^[0-9]+$ ]] || [ "$MIN_HEALTHY" -lt 1 ]; then
     exit 1
 fi
 
-HEALTHY=0
-FAILED=()
+RESULT_DIR=$(mktemp -d)
+cleanup() {
+    rm -rf "$RESULT_DIR"
+}
+trap cleanup EXIT
+
+PIDS=()
 
 for port in "${PORTS[@]}"; do
-    if curl -fsS --connect-timeout 3 --max-time 10 --socks5-hostname "127.0.0.1:${port}" \
-        "$HEALTH_URL" 2>/dev/null | grep -qE "warp=(plus|on)"; then
+    (
+        if curl -fsS --connect-timeout 3 --max-time 10 --socks5-hostname "127.0.0.1:${port}" \
+            "$HEALTH_URL" 2>/dev/null | grep -qE "warp=(plus|on)"; then
+            : > "${RESULT_DIR}/${port}.ok"
+        else
+            : > "${RESULT_DIR}/${port}.failed"
+        fi
+    ) &
+    PIDS+=($!)
+done
+
+for pid in "${PIDS[@]}"; do
+    wait "$pid" 2>/dev/null || true
+done
+
+HEALTHY=0
+FAILED=()
+for port in "${PORTS[@]}"; do
+    if [ -f "${RESULT_DIR}/${port}.ok" ]; then
         HEALTHY=$((HEALTHY + 1))
     else
         FAILED+=("$port")
